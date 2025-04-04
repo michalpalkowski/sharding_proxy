@@ -14,7 +14,6 @@ declare_contract() {
   class_hash=$(echo "$output" | grep "class_hash" | awk '{print $2}')
   echo $class_hash > $class_hash_file
   echo "$contract_name class_hash: $class_hash"
-  sleep 20
 }
 
 # Function to deploy a contract with retry policy

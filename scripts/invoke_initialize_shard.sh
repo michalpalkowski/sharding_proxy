@@ -3,12 +3,23 @@
 TEST_CONTRACT_ADDRESS=$(cat test_contract_address.txt)
 SHARDING_CONTRACT_ADDRESS=$(cat sharding_contract_address.txt)
 
+case $1 in 
+    "add")
+    SHARD_ID="0 0 0"
+    ;;
+    "lock")
+    SHARD_ID="1 0 0"
+    ;;
+    "set")
+    SHARD_ID="2 0 0"
+    ;;
+esac
+
 echo "Calling get_storage_slots to get slot information..."
 SLOTS_OUTPUT=$(sncast call \
     --contract-address "$TEST_CONTRACT_ADDRESS" \
     --function "get_storage_slots"\
-    --calldata 0x1)
-
+    --calldata "$SHARD_ID")
 echo "Slots output: $SLOTS_OUTPUT"
 
 SLOTS_ARRAY=$(echo "$SLOTS_OUTPUT" | grep -o "response: \[.*\]" | sed 's/response: \[//' | sed 's/\]//' | sed 's/,//g')

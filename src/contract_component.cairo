@@ -1,35 +1,61 @@
 use starknet::{ContractAddress};
-use sharding_tests::sharding::StorageSlotWithContract;
-use sharding_tests::sharding::CRDTStorageSlot;
 
 #[derive(Drop, Serde, Hash, Copy, Debug, PartialEq, starknet::Store)]
 pub enum CRDType {
-    Add,
+    Add: (ContractAddress, felt252),
     #[default]
-    Lock,
-    Set,
+    Lock: (ContractAddress, felt252),
+    Set: (ContractAddress, felt252),
 }
 
-trait CRDTypeTrait {
+pub trait CRDTypeTrait {
     fn verify_crd_type(self: Option<CRDType>, crd_type: CRDType);
+    fn contract_address(self: CRDType) -> ContractAddress;
+    fn slot(self: CRDType) -> felt252;
 }
 
 impl CRDTypeImpl of CRDTypeTrait {
     fn verify_crd_type(self: Option<CRDType>, crd_type: CRDType) {
+        let error_msg = match crd_type {
+            CRDType::Add => 'A: Sharding already initialized',
+            CRDType::Lock => 'L: Sharding already initialized',
+            CRDType::Set => 'S: Sharding already initialized',
+        };
+
         match crd_type {
             CRDType::Add => {
-                assert(
-                    self == Option::None || self == Option::Some(CRDType::Add),
-                    'A: Sharding already initialized',
-                );
+                let is_valid = match self {
+                    Option::None => true,
+                    Option::Some(prev) => match prev {
+                        CRDType::Add => true,
+                        _ => false,
+                    },
+                };
+                assert(is_valid, error_msg);
             },
-            CRDType::Lock => { assert(self == Option::None, 'L: Sharding already initialized'); },
+            CRDType::Lock => { assert(self == Option::None, error_msg); },
             CRDType::Set => {
-                assert(
-                    self == Option::None || self == Option::Some(CRDType::Set),
-                    'S: Sharding already initialized',
-                );
+                let is_valid = match self {
+                    Option::None => true,
+                    Option::Some(prev) => match prev {
+                        CRDType::Set => true,
+                        _ => false,
+                    },
+                };
+                assert(is_valid, error_msg);
             },
+        }
+    }
+    fn contract_address(self: CRDType) -> ContractAddress {
+        match self {
+            CRDType::Add((address, _)) | CRDType::Lock((address, _)) |
+            CRDType::Set((address, _)) => address,
+        }
+    }
+
+    fn slot(self: CRDType) -> felt252 {
+        match self {
+            CRDType::Add((_, slot)) | CRDType::Lock((_, slot)) | CRDType::Set((_, slot)) => slot,
         }
     }
 }
@@ -39,14 +65,15 @@ pub trait IContractComponent<TContractState> {
     fn initialize_shard(
         ref self: TContractState,
         sharding_contract_address: ContractAddress,
-        contract_slots_changes: Span<StorageSlotWithContract>,
+        contract_slots_changes: Span<CRDType>,
     );
-    fn update_state(
+    fn update_shard_state(
         ref self: TContractState,
-        storage_changes: Array<CRDTStorageSlot>,
+        storage_changes: Array<(felt252, felt252)>,
         shard_id: felt252,
         contract_address: ContractAddress,
     );
+    fn get_shard_id(ref self: TContractState, contract_address: ContractAddress) -> felt252;
 }
 
 #[starknet::component]
@@ -61,7 +88,6 @@ pub mod contract_component {
     use sharding_tests::sharding::{IShardingDispatcher, IShardingDispatcherTrait};
     use sharding_tests::sharding::StorageSlotWithContract;
     use core::starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
-    use sharding_tests::sharding::CRDTStorageSlot;
     use starknet::storage_access::StorageAddress;
     use super::CRDType;
     use super::CRDTypeTrait;
@@ -72,7 +98,7 @@ pub mod contract_component {
 
     #[storage]
     pub struct Storage {
-        slots: Map<(ContractAddress, slot_value), (Option<CRDType>, init_count)>,
+        slots: Map<slot_value, (Option<CRDType>, init_count)>,
         sharding_contract_address: ContractAddress,
         shard_id: Map<ContractAddress, shard_id>,
         shard_id_for_slot: Map<StorageSlotWithContract, shard_id>,
@@ -90,7 +116,7 @@ pub mod contract_component {
     pub struct ContractSlotUpdated {
         pub contract_address: ContractAddress,
         pub shard_id: felt252,
-        pub slots_to_change: Array<CRDTStorageSlot>,
+        pub slots_to_change: Array<(felt252, felt252)>,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -102,7 +128,7 @@ pub mod contract_component {
 
     #[derive(Drop, starknet::Event)]
     pub struct ContractComponentUpdated {
-        pub storage_changes: Array<CRDTStorageSlot>,
+        pub storage_changes: Array<(felt252, felt252)>,
     }
 
     pub mod Errors {
@@ -118,7 +144,7 @@ pub mod contract_component {
         fn initialize_shard(
             ref self: ComponentState<TContractState>,
             sharding_contract_address: ContractAddress,
-            contract_slots_changes: Span<StorageSlotWithContract>,
+            contract_slots_changes: Span<CRDType>,
         ) {
             let caller = get_caller_address();
             self.sharding_contract_address.write(sharding_contract_address);
@@ -129,24 +155,20 @@ pub mod contract_component {
 
             println!("Initializing shard for caller: {:?}", caller);
 
-            for storage_slot in contract_slots_changes {
-                let storage_slot = *storage_slot;
-                let crd_type = storage_slot.crd_type;
+            for crd_type in contract_slots_changes {
+                let crd_type = *crd_type;
 
-                let (prev_crd_type, init_count) = self
-                    .slots
-                    .read((storage_slot.contract_address, storage_slot.slot));
+                let (prev_crd_type, init_count) = self.slots.read(crd_type.slot());
 
                 prev_crd_type.verify_crd_type(crd_type);
 
-                self
-                    .slots
-                    .write(
-                        (storage_slot.contract_address, storage_slot.slot),
-                        (Option::Some(crd_type), init_count + 1),
-                    );
-                self.shard_id_for_slot.write(storage_slot, new_shard_id);
-                println!("Locked slot: {:?} with shard_id: {:?}", storage_slot, new_shard_id);
+                let slot = StorageSlotWithContract {
+                    contract_address: crd_type.contract_address(), slot: crd_type.slot(),
+                };
+
+                self.slots.write(crd_type.slot(), (Option::Some(crd_type), init_count + 1));
+                self.shard_id_for_slot.write(slot, new_shard_id);
+                println!("Locked slot: {:?} with shard_id: {:?}", crd_type, new_shard_id);
             };
 
             // Emit initialization event
@@ -165,11 +187,11 @@ pub mod contract_component {
                 );
         }
 
-        fn update_state(
+        fn update_shard_state(
             ref self: ComponentState<TContractState>,
-            storage_changes: Array<CRDTStorageSlot>,
+            storage_changes: Array<(felt252, felt252)>,
             shard_id: felt252,
-            contract_address: ContractAddress,
+            contract_address: ContractAddress //todo: remove this
         ) {
             assert(storage_changes.len() != 0, Errors::NO_CONTRACTS_SUBMITTED);
             let mut slots_to_change = ArrayTrait::new();
@@ -179,31 +201,26 @@ pub mod contract_component {
             assert(sharding_address != zero_address, Errors::NOT_INITIALIZED);
 
             for storage_change in storage_changes.span() {
-                let storage_key = *storage_change.key;
-                let storage_value = *storage_change.value;
-                let crd_type = *storage_change.crd_type;
+                let (storage_key, storage_value) = *storage_change;
 
                 // Create a StorageSlot to check if it's locked
                 let slot = StorageSlotWithContract {
-                    contract_address: contract_address, slot: storage_key, crd_type,
+                    contract_address: contract_address, slot: storage_key,
                 };
 
                 let slot_shard_id = self.shard_id_for_slot.read(slot);
-                let (prev_crd_type, _) = self.slots.read((slot.contract_address, slot.slot));
+                let (crd_type, _) = self.slots.read(slot.slot);
 
                 println!(
-                    "Checking slot (Lock): {:?}, slot_shard_id: {:?}, contract_shard_id: {:?}, prev_crd_type: {:?}",
+                    "Checking slot (Lock): {:?}, slot_shard_id: {:?}, contract_shard_id: {:?}, crd_type: {:?}",
                     slot,
                     slot_shard_id,
                     shard_id,
-                    prev_crd_type,
+                    crd_type,
                 );
 
-                if slot_shard_id == shard_id && prev_crd_type == Option::Some(crd_type) {
-                    slots_to_change
-                        .append(
-                            CRDTStorageSlot { key: storage_key, value: storage_value, crd_type },
-                        );
+                if slot_shard_id == shard_id && crd_type != Option::None {
+                    slots_to_change.append((storage_key, storage_value));
                 } else {
                     println!("Skipping slot with mismatched shard_id or not locked: {:?}", slot);
                 }
@@ -213,29 +230,34 @@ pub mod contract_component {
                 println!("WARNING: No slots to update for contract: {:?}", contract_address);
             };
 
-            self.update_shard(slots_to_change.clone());
+            self.update_shard(slots_to_change.clone(), contract_address);
 
             for slot_to_unlock in slots_to_change.span() {
+                let (storage_key, _) = *slot_to_unlock;
                 // Create a StorageSlot to unlock
                 let slot = StorageSlotWithContract {
-                    contract_address: contract_address,
-                    slot: *slot_to_unlock.key,
-                    crd_type: *slot_to_unlock.crd_type,
+                    contract_address: contract_address, slot: storage_key,
                 };
+
                 println!("Unlocking slot: {:?}", slot);
-                let (prev_crd_type, init_count) = self
-                    .slots
-                    .read((slot.contract_address, slot.slot));
+                let (crd_type, init_count) = self.slots.read(slot.slot);
                 assert(init_count != 0, Errors::STORAGE_UNLOCKED);
-                if init_count - 1 == 0 {
-                    self.slots.write((slot.contract_address, slot.slot), (Option::None, 0));
+
+                let new_init_count = init_count - 1;
+
+                if new_init_count == 0 {
+                    self.slots.write(slot.slot, (Option::None, 0));
                 } else {
-                    self
-                        .slots
-                        .write((slot.contract_address, slot.slot), (prev_crd_type, init_count - 1));
+                    self.slots.write(slot.slot, (crd_type, new_init_count));
                 }
             };
             self.emit(ContractSlotUpdated { contract_address, shard_id, slots_to_change });
+        }
+
+        fn get_shard_id(
+            ref self: ComponentState<TContractState>, contract_address: ContractAddress,
+        ) -> felt252 {
+            self.shard_id.read(contract_address)
         }
     }
 
@@ -244,14 +266,17 @@ pub mod contract_component {
         TContractState, +HasComponent<TContractState>,
     > of InternalTrait<TContractState> {
         fn update_shard(
-            ref self: ComponentState<TContractState>, storage_changes: Array<CRDTStorageSlot>,
+            ref self: ComponentState<TContractState>,
+            storage_changes: Array<(felt252, felt252)>,
+            contract_address: ContractAddress,
         ) {
             for storage_change in storage_changes.span() {
-                let key = *storage_change.key;
-                let value = *storage_change.value;
-                let crd_type = *storage_change.crd_type;
-
+                let (key, value) = *storage_change;
                 let storage_address: StorageAddress = key.try_into().unwrap();
+
+                let (crd_type, _) = self.slots.read(key);
+                assert(crd_type != Option::None, 'CRDType not found');
+                let crd_type = crd_type.unwrap();
 
                 match crd_type {
                     CRDType::Lock => {

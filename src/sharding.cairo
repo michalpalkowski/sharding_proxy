@@ -5,19 +5,11 @@ use sharding_tests::contract_component::CRDType;
 pub struct StorageSlotWithContract {
     pub contract_address: ContractAddress,
     pub slot: felt252,
-    pub crd_type: CRDType,
-}
-
-#[derive(Drop, Serde, Hash, Copy, Debug)]
-pub struct CRDTStorageSlot {
-    pub key: felt252,
-    pub value: felt252,
-    pub crd_type: CRDType,
 }
 
 #[starknet::interface]
 pub trait ISharding<TContractState> {
-    fn initialize_sharding(ref self: TContractState, storage_slots: Span<StorageSlotWithContract>);
+    fn initialize_sharding(ref self: TContractState, storage_slots: Span<CRDType>);
 
     fn update_contract_state(
         ref self: TContractState, snos_output: Span<felt252>, shard_id: felt252,
@@ -38,12 +30,11 @@ pub mod sharding {
     };
     use sharding_tests::shard_output::ShardOutput;
     use super::ISharding;
-    use super::StorageSlotWithContract;
     use sharding_tests::contract_component::IContractComponentDispatcher;
     use sharding_tests::contract_component::IContractComponentDispatcherTrait;
     use sharding_tests::config::{config_cpt, config_cpt::InternalTrait as ConfigInternal};
     use core::starknet::storage::{StoragePointerReadAccess, StoragePointerWriteAccess};
-    use super::CRDTStorageSlot;
+    use sharding_tests::contract_component::CRDType;
 
     component!(path: ownable_cpt, storage: ownable, event: OwnableEvent);
     component!(path: config_cpt, storage: config, event: ConfigEvent);
@@ -78,7 +69,7 @@ pub mod sharding {
     pub struct ShardInitialized {
         pub initializer: ContractAddress,
         pub shard_id: felt252,
-        pub storage_slots: Span<StorageSlotWithContract>,
+        pub storage_slots: Span<CRDType>,
     }
 
     pub mod Errors {
@@ -95,9 +86,7 @@ pub mod sharding {
 
     #[abi(embed_v0)]
     impl ShardingImpl of ISharding<ContractState> {
-        fn initialize_sharding(
-            ref self: ContractState, storage_slots: Span<StorageSlotWithContract>,
-        ) {
+        fn initialize_sharding(ref self: ContractState, storage_slots: Span<CRDType>) {
             self.config.assert_only_owner_or_operator();
 
             let caller = get_caller_address();
@@ -108,9 +97,7 @@ pub mod sharding {
 
             self
                 .emit(
-                    ShardInitialized {
-                        initializer: caller, shard_id: new_shard_id, storage_slots: storage_slots,
-                    },
+                    ShardInitialized { initializer: caller, shard_id: new_shard_id, storage_slots },
                 );
         }
 
@@ -137,23 +124,17 @@ pub mod sharding {
 
                     let mut storage_changes = ArrayTrait::new();
                     for storage_change in contract.storage_changes.span() {
-                        let storage_key = *storage_change.key;
-                        let storage_value = *storage_change.value;
-                        let crd_type = *storage_change.crd_type;
+                        let (storage_key, storage_value) = *storage_change;
 
-                        storage_changes
-                            .append(
-                                CRDTStorageSlot {
-                                    key: storage_key, value: storage_value, crd_type,
-                                },
-                            );
+                        storage_changes.append((storage_key, storage_value));
                     };
                     assert(storage_changes.span().len() != 0, Errors::NO_STORAGE_CHANGES);
 
                     let contract_dispatcher = IContractComponentDispatcher {
                         contract_address: contract_address,
                     };
-                    contract_dispatcher.update_state(storage_changes, shard_id, contract_address);
+                    contract_dispatcher
+                        .update_shard_state(storage_changes, shard_id, contract_address);
                 }
             }
         }
